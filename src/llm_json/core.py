@@ -118,13 +118,24 @@ def try_parse(
 
 
 def _candidates(text: str, *, repair: bool):
-    """Yield ``(stage, candidate)`` pairs in the order they should be tried."""
-    for name, extract in _EXTRACTORS:
-        yield name, extract(text)
+    """Yield ``(stage, candidate)`` pairs in the order they should be tried.
+
+    Repairs are applied to each extractor's candidate rather than to the whole
+    response, and the distinction is load-bearing. Quote normalisation over the
+    raw text would read the apostrophe in a preamble like "here's the analysis"
+    as opening a string literal and corrupt everything after it. Extraction has
+    to narrow the text to the part that is meant to be JSON before any transform
+    is allowed near it.
+
+    Unrepaired candidates are all tried first, so a faithful parse is always
+    preferred over a rewritten one.
+    """
+    extracted = [(name, extract(text)) for name, extract in _EXTRACTORS]
+    yield from extracted
 
     if not repair:
         return
 
-    repaired = repair_text(text)
-    for name, extract in _EXTRACTORS:
-        yield f"{name}+repair", extract(repaired)
+    for name, candidate in extracted:
+        repaired = None if candidate is None else repair_text(candidate)
+        yield f"{name}+repair", repaired
