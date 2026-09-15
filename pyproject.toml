@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "llm-json"
-version = "0.1.0.dev0"
+version = "0.1.0"
 description = "Extract a usable object from language model output, or fail with the raw response attached."
 readme = "README.md"
 requires-python = ">=3.9"

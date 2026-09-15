@@ -52,7 +52,7 @@ Ordering extraction first means the brace extractor reads strict JSON quoting,
 so a single-quoted string containing a structural `}` closes the object early:
 
 ```python
-parse("{'note': 'use } here'}", repair=True)         # works — direct wins
+parse("{'note': 'use } here'}", repair=True)  # works — direct wins
 parse("Sure:\n{'note': 'use } here'}", repair=True)  # ParseFailed
 ```
 
@@ -102,7 +102,7 @@ prefix of an unknown value.
 An opened-but-empty container is deliberately *not* a safe point:
 
 ```python
-parse('{"a": 1, "b": {')   # {'a': 1}, not {'a': 1, 'b': {}}
+parse('{"a": 1, "b": {')  # {'a': 1}, not {'a': 1, 'b': {}}
 ```
 
 `{"b": {}}` asserts that `b` is an empty object, which is a claim the text does
