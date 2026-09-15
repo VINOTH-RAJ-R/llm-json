@@ -1,0 +1,62 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e ".[dev]"
+      - run: pytest
+
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install ruff
+      - run: ruff check .
+      - run: ruff format --check .
+
+  no-runtime-deps:
+    name: zero runtime dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install build && python -m build --wheel
+      - name: install the wheel alone and import it
+        run: |
+          python -m venv /tmp/bare
+          /tmp/bare/bin/pip install --no-deps dist/*.whl
+          /tmp/bare/bin/python -c "import llm_json; print(llm_json.__version__)"
+      - name: assert nothing else was pulled in
+        run: |
+          extras=$(/tmp/bare/bin/pip list --format=freeze \
+            | grep -vEi '^(llm.json|pip|setuptools|wheel)==' || true)
+          if [ -n "$extras" ]; then
+            echo "unexpected runtime dependencies present:"; echo "$extras"; exit 1
+          fi
+          echo "runtime dependency set is empty, as intended"
