@@ -185,3 +185,32 @@ class TestTryParse:
     def test_honours_repair(self):
         assert try_parse('{"a": 1,}') is None
         assert try_parse('{"a": 1,}', repair=True) == {"a": 1}
+
+
+class TestKnownLimitation:
+    """The one input shape the ladder does not recover, pinned deliberately.
+
+    A single-quoted string containing a structural brace, with prose around it.
+    Either condition alone is handled; together they are not, because fixing it
+    would mean normalising quotes before extraction and reintroducing the
+    apostrophe-in-preamble bug on far more common input.
+
+    These tests exist so the boundary is a documented decision rather than an
+    undiscovered gap, and so that anyone who moves it has to say so.
+    """
+
+    def test_brace_in_single_quoted_string_works_without_prose(self):
+        assert parse("{'note': 'use } here'}", repair=True) == {"note": "use } here"}
+
+    def test_prose_works_without_a_brace_in_a_single_quoted_string(self):
+        assert parse("Sure:\n{'amount': 4200}", repair=True) == {"amount": 4200}
+
+    def test_double_quoted_equivalent_works_with_prose(self):
+        text = 'Sure:\n{"note": "use } here"}'
+        assert parse(text, repair=True) == {"note": "use } here"}
+
+    def test_both_conditions_together_fail_and_keep_the_raw_response(self):
+        text = "Sure:\n{'note': 'use } here'}"
+        with pytest.raises(ParseFailed) as caught:
+            parse(text, repair=True)
+        assert caught.value.raw == text
