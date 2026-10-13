@@ -1,53 +1,39 @@
 # llm-json
 
 [![ci](https://github.com/VINOTH-RAJ-R/llm-json/actions/workflows/ci.yml/badge.svg)](https://github.com/VINOTH-RAJ-R/llm-json/actions/workflows/ci.yml)
-[![python](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/downloads/)
-[![licence](https://img.shields.io/badge/licence-MIT-green)](LICENSE)
+![python](https://img.shields.io/badge/python-3.9%2B-blue)
 
-Extract a usable object from language model output, or fail with the raw
-response attached.
-
-Zero runtime dependencies.
+Extract a usable object from language model output, or fail with the raw response attached. Zero runtime dependencies.
 
 ## The problem
 
-You asked for JSON. Most of the time you get JSON. The rest of the time you get
-one of these, and each one is a different `json.JSONDecodeError`:
+You asked a model for JSON. Most of the time you get it. The rest of the time you get this:
 
 ````text
-```json                              a markdown fence
-{"amount": 4200}
+Sure, here's the analysis:
+
+```json
+{"amount": 4200, "currency": "INR"}
 ```
-
-Sure, here is the analysis:          a conversational preamble
-{"amount": 4200}
-
-{"amount": 4200}                     trailing commentary
-Hope that helps!
-
-{"invoice": "INV-41", "amount": 42   truncated at a token limit
-
-{'amount': 4200, 'currency': 'INR',} single quotes and a trailing comma
-
-{"a": 1}{"b": 2}                     two objects when you asked for one
 ````
 
-The usual handling is this:
+Or a response that stops mid-object because it hit a token limit. Or single quotes. Or two objects when you asked for one.
+
+The usual handling throws away the one thing you need later:
 
 ```python
 try:
     data = json.loads(response)
 except json.JSONDecodeError:
-    return None
+    return None      # what did the model actually say?
 ```
 
-which throws away the only artefact that would let anyone work out what
-happened: what the model actually said.
+Three days after the incident, `expecting value at line 1 column 1` tells you nothing. The raw text tells you the model started apologising instead of answering.
 
 ## Install
 
 ```bash
-pip install git+https://github.com/VINOTH-RAJ-R/llm-json
+pip install llm-json
 ```
 
 ## Quickstart
@@ -55,198 +41,62 @@ pip install git+https://github.com/VINOTH-RAJ-R/llm-json
 ```python
 from llm_json import parse, try_parse, ParseFailed
 
-parse('```json\n{"amount": 4200}\n```')  # {'amount': 4200}
-parse('Sure!\n{"amount": 4200}\nHope that helps')  # {'amount': 4200}
-parse("{'amount': 4200,}", repair=True)  # {'amount': 4200}
-
-try_parse("not json", default={})  # {} — never raises
+data = parse(response_text)                      # raises ParseFailed
+data = parse(response_text, repair=True)         # also attempts repairs
+data = try_parse(response_text, default={})      # never raises
 
 try:
-    parse(response, context={"request_id": req_id})
-except ParseFailed as err:
-    log.error("unparseable", raw=err.raw, stage=err.last_stage, ctx=err.context)
+    data = parse(response_text, context={"prompt": "extract_v3"})
+except ParseFailed as e:
+    log.warning("parse failed",
+                stage=e.last_stage,   # where it gave up
+                raw=e.raw,            # the actual response
+                context=e.context)
 ```
 
 ## How it escalates
 
-The ladder has two dimensions rather than one. An **extractor** decides which
-substring of the response is meant to be JSON. A **repair** decides how to fix
-text that is nearly JSON. Every extractor is tried against the response, and
-then — only when `repair=True` — against a repaired copy of its own candidate.
-
 | Stage | What it does | What it catches |
 |---|---|---|
-| `direct` | `json.loads` on the stripped string | The happy path |
-| `fenced` | Takes the inside of the first markdown fence, closed or not | Fenced output, and fences cut off at a token limit |
-| `braces` | Scans from the first structural `{` or `[` to its balanced close, tracking string and escape state | Preamble, trailing commentary, two objects, **truncation** |
-| `…+repair` | Retries each candidate with trailing commas removed, quotes normalised and an open string closed | Single-quoted JSON, trailing commas, cut-off strings |
-| fail | Raises `ParseFailed` carrying `.raw`, `.last_stage`, `.attempts`, `.context` | Everything else |
+| `direct` | `json.loads` on the stripped text | The happy path |
+| `fenced` | Strips markdown fences, retries | ` ```json ` wrapping, including unclosed fences |
+| `braces` | Scans from the first `{` or `[` to its balanced close, string- and escape-aware | Preamble, trailing prose, truncation |
 
-Unrepaired candidates are all tried before any repaired one, so a faithful parse
-is always preferred over a rewritten one.
+With `repair=True`, each stage also retries against a repaired copy of its own candidate: trailing commas removed, single quotes normalised, one unterminated string closed. Unrepaired candidates are always tried first.
 
-### Why the repair applies to the candidate, not the response
+## Truncation
 
-Repairing the whole response first looks simpler and is wrong. Quote
-normalisation over this input:
+When a response is cut off mid-object, the scanner rewinds to the last completed member rather than appending closing delimiters.
 
-```text
-Here's the analysis:
-{'amount': 4200}
-```
+That matters for one specific reason. A response truncated inside the number `4200` would, under a closing strategy, come back as `42` — valid JSON, plausible, and wrong. This library drops the incomplete member instead. No scalar is ever invented or completed.
 
-reads the apostrophe in `Here's` as opening a string literal, swallows
-everything up to the next quote character, and destroys the object. Extraction
-has to narrow the text before any transform is allowed near it.
+Truncated arrays may therefore come back short. That is the intended trade: missing data announces itself, wrong data does not.
 
-## Truncation, and the number that would have been wrong
-
-This is the case worth reading the source for.
-
-A response cut off at a token limit leaves delimiters open. The obvious recovery
-is to append them:
-
-```text
-{"invoice": "INV-2026-0041", "amount": 42
-```
-
-Close that naively and you get `{"invoice": "INV-2026-0041", "amount": 42}`. It
-parses. It validates. It reports an amount of **42** when the real figure was
-**4200**, and nothing downstream can tell, because there is no error to catch.
-
-So the scanner records the last offset at which a member had *completed*, and
-rewinds to it before closing:
-
-```python
-parse('{"invoice": "INV-2026-0041", "amount": 42')
-# {'invoice': 'INV-2026-0041'}
-```
-
-The amount is absent. Your schema validation catches an absence immediately. It
-would never have caught ₹42.
-
-**The guarantee**: no scalar is ever invented or completed. A value that comes
-back is a value that appeared, complete, in the response.
-
-**Not guaranteed**: a truncated array may come back short, because nothing in
-the text says how many elements were coming. That is inherent to truncation
-rather than a choice, and the test suite pins the guarantee by cutting a known
-document at every offset and checking that every recovered value matches the
-original.
-
-## Why the raw response matters
-
-Six weeks after deployment, extraction starts failing for about one request in
-forty. Here is the difference the exception makes.
-
-**Without:**
-
-```
-ERROR  extraction failed for request req-8813
-```
-
-You know something broke. You do not know what the model said, so you cannot
-tell whether the prompt drifted, the model version changed, the input was
-unusual, or your parser has a bug. The response is gone. You add logging and
-wait for it to happen again.
-
-**With:**
-
-```python
-except ParseFailed as err:
-    log.error("extraction failed",
-              raw=err.raw,          # the full response, exactly as received
-              stage=err.last_stage, # where it gave up
-              attempts=err.attempts,# every stage tried, and why each failed
-              ctx=err.context)      # your request id, model, prompt version
-```
-
-```
-ERROR  extraction failed  stage=braces
-       raw='I can only provide this information if you confirm you are
-            authorised to access invoice data.'
-```
-
-The model refused. No parser change would have helped, and you know that in
-thirty seconds instead of a week.
-
-`__str__` abbreviates to 200 characters so a log line stays readable. `err.raw`
-is never truncated.
-
-## Telemetry, and fallback rate as a drift signal
+## Telemetry
 
 ```python
 from llm_json import set_telemetry_hook
 
-
 def on_fallback(event):
-    metrics.increment(
-        "llm_json.fallback", tags={"stage": event.stage, "ok": event.succeeded}
-    )
-
+    metrics.increment("llm_json.fallback", tags={"stage": event.stage})
 
 set_telemetry_hook(on_fallback)
 ```
 
-The hook fires whenever any stage beyond `direct` was reached, successes and
-failures alike.
+The hook fires whenever a stage beyond `direct` was reached, on failure as well as success. Tracked over time, a rising fallback rate is an early signal that a prompt is drifting, a model version changed underneath you, or responses are hitting a token limit. It usually moves before accuracy metrics do.
 
-No single event is interesting. **The rate is.** A pipeline that has always
-resolved 2% of responses at `fenced` and now resolves 11% is telling you that
-something changed upstream — a prompt edit, a model version rolled underneath
-you, a new input distribution. That number moves *before* accuracy metrics do,
-because accuracy is measured against labels you collect slowly and this is
-measured against every request you serve.
-
-A shift in which *stage* resolves is more diagnostic than the total. A jump in
-`fenced` usually means prompt or formatting drift. A jump in `braces` means the
-model has started talking around the answer. A jump in truncated recoveries
-means responses are hitting the token ceiling and your `max_tokens` needs
-raising before anyone notices missing fields.
-
-The hook is wrapped so anything it raises is swallowed. A telemetry bug must
-never become a parse bug.
+A hook that raises cannot break parsing.
 
 ## Non-goals
 
-Deliberately absent, so the scope is a decision rather than an omission:
+No schema validation — use pydantic on the result. No streaming. No LLM calls. No dependencies.
 
-- **No schema validation.** Use pydantic. This library gets you a `dict`; what
-  that dict ought to contain is a separate concern with better tools.
-- **No streaming.** Partial parsing of a live stream is a different problem with
-  different tradeoffs.
-- **No LLM calls.** It never touches the network and has no opinion on your
-  provider.
-- **No dependencies.** CI installs the built wheel into a bare environment and
-  fails if anything else appears.
-
-### Known limitation
-
-One input shape is not recovered: a single-quoted string containing a structural
-`}` or `]`, **and** surrounding prose.
-
-```python
-parse("{'note': 'use } here'}", repair=True)  # works
-parse("Sure:\n{'note': 'use } here'}", repair=True)  # ParseFailed
-```
-
-Either condition alone is fine. Together they are not, and the reason is the
-ordering trade-off above. Without prose, `direct` hands the whole string to
-quote normalisation, which then sees the brace is inside a string. With prose,
-extraction must run first, and the brace extractor — reading strict JSON quoting
-— treats that brace as structure and closes early.
-
-Fixing it would mean normalising quotes before extraction, which reintroduces
-the apostrophe bug on every response with a preamble. That is a far more common
-input than this one, so the trade goes this way deliberately. Double-quoted
-equivalents are handled correctly in all positions.
+There is one known input this does not recover: a single-quoted string containing a structural `}` or `]`, with prose around the object. [Why that was accepted](DESIGN.md#the-limitation-this-creates-and-why-it-was-accepted).
 
 ## Design notes
 
-[DESIGN.md](DESIGN.md) records why the ladder is shaped the way it is, why
-truncation rewinds rather than closes, and why one scanner is shared by three
-consumers.
+[DESIGN.md](DESIGN.md) covers the decisions behind the ladder, why repairs apply to the candidate rather than the whole response, how truncation recovery works in detail, and two approaches that were considered and rejected.
 
 ## Licence
 
-MIT. See [LICENSE](LICENSE).
+MIT.
